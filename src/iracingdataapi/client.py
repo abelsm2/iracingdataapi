@@ -36,6 +36,9 @@ class irDataClient:
 
         # assume access token is valid, we'll raise later if necessary
         self.authenticated = True if self.access_token else False
+        
+        # Rate limit header storage
+        self.last_rate_limit_headers = {}
 
     def _encode_password(self, username: str, password: str) -> str:
         initial_hash = hashlib.sha256(
@@ -43,6 +46,16 @@ class irDataClient:
         ).digest()
 
         return base64.b64encode(initial_hash).decode("utf-8")
+
+    def _store_rate_limit_headers(self, response) -> None:
+        """Store rate limit headers from HTTP response for user access."""
+        rate_limit_headers = {
+            'x-ratelimit-limit': response.headers.get('x-ratelimit-limit'),
+            'x-ratelimit-remaining': response.headers.get('x-ratelimit-remaining'),
+            'x-ratelimit-reset': response.headers.get('x-ratelimit-reset')
+        }
+        # Only store headers that are present
+        self.last_rate_limit_headers = {k: v for k, v in rate_limit_headers.items() if v is not None}
 
     def _login(self) -> str:
         headers = {"Content-Type": "application/json"}
@@ -119,6 +132,10 @@ class irDataClient:
 
         if r.status_code != 200:
             raise RuntimeError("Unhandled Non-200 response", r)
+        
+        # Store rate limit headers from successful response
+        self._store_rate_limit_headers(r)
+        
         data = r.json()
         if not isinstance(data, list) and "link" in data.keys():
             return [data.get("link"), True]
@@ -153,6 +170,9 @@ class irDataClient:
 
         if r.status_code != 200:
             raise RuntimeError("Unhandled Non-200 response", r)
+
+        # Store rate limit headers from successful response
+        self._store_rate_limit_headers(r)
 
         content_type = r.headers.get("Content-Type")
 
@@ -1439,3 +1459,67 @@ class irDataClient:
 
         """
         return self._get_resource("/data/series/stats_series")
+
+    # Rate Limit Helper Methods
+    def get_rate_limit_limit(self) -> Optional[int]:
+        """Get the current total rate limit from the last response.
+        
+        Returns:
+            int: The total rate limit, or None if header not available.
+        """
+        limit = self.last_rate_limit_headers.get('x-ratelimit-limit')
+        return int(limit) if limit is not None else None
+
+    def get_rate_limit_remaining(self) -> Optional[int]:
+        """Get the remaining requests in the current rate limit window.
+        
+        Returns:
+            int: The remaining requests, or None if header not available.
+        """
+        remaining = self.last_rate_limit_headers.get('x-ratelimit-remaining')
+        return int(remaining) if remaining is not None else None
+
+    def get_rate_limit_reset(self) -> Optional[int]:
+        """Get the rate limit reset timestamp.
+        
+        Returns:
+            int: The reset timestamp (epoch), or None if header not available.
+        """
+        reset = self.last_rate_limit_headers.get('x-ratelimit-reset')
+        return int(reset) if reset is not None else None
+
+    def get_rate_limit_reset_time(self) -> Optional[datetime]:
+        """Get the rate limit reset time as a datetime object.
+        
+        Returns:
+            datetime: The reset time, or None if header not available.
+        """
+        reset = self.get_rate_limit_reset()
+        return datetime.fromtimestamp(reset) if reset is not None else None
+
+    def seconds_until_reset(self) -> Optional[float]:
+        """Get the number of seconds until the rate limit resets.
+        
+        Returns:
+            float: Seconds until reset, or None if header not available.
+        """
+        reset_time = self.get_rate_limit_reset_time()
+        if reset_time is not None:
+            delta = reset_time - datetime.now()
+            return max(0, delta.total_seconds())
+        return None
+
+    @property
+    def rate_limit_info(self) -> dict:
+        """Get all available rate limit information.
+        
+        Returns:
+            dict: Dictionary containing limit, remaining, reset info.
+        """
+        return {
+            'limit': self.get_rate_limit_limit(),
+            'remaining': self.get_rate_limit_remaining(),
+            'reset': self.get_rate_limit_reset(),
+            'reset_time': self.get_rate_limit_reset_time(),
+            'seconds_until_reset': self.seconds_until_reset()
+        }

@@ -1,7 +1,7 @@
 import base64
 import hashlib
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -1679,6 +1679,154 @@ class TestIrDataClient(unittest.TestCase):
             response = self.access_token_client.result(
                 subsession_id=subsession_id, include_licenses=include_licenses
             )
+
+    # Rate Limit Header Tests
+    def test_rate_limit_headers_initialization(self):
+        """Test that rate limit headers are initialized as empty dict"""
+        client = irDataClient(username="test_user", password="test_password")
+        self.assertEqual(client.last_rate_limit_headers, {})
+
+    @patch.object(irDataClient, "_get_resource")
+    def test_rate_limit_headers_storage(self, mock_get_resource):
+        """Test that rate limit headers are stored from successful responses"""
+        # Mock a response with rate limit headers
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            'x-ratelimit-limit': '1000',
+            'x-ratelimit-remaining': '999',
+            'x-ratelimit-reset': '1640995200'
+        }
+        mock_response.json.return_value = {"test": "data"}
+        
+        # Set authenticated to bypass login
+        self.client.authenticated = True
+        
+        # Mock the session.get to return our response
+        with patch.object(self.client.session, 'get', return_value=mock_response):
+            self.client._get_resource_or_link("http://test.com")
+        
+        # Verify headers were stored
+        expected_headers = {
+            'x-ratelimit-limit': '1000',
+            'x-ratelimit-remaining': '999',
+            'x-ratelimit-reset': '1640995200'
+        }
+        self.assertEqual(self.client.last_rate_limit_headers, expected_headers)
+
+    @patch.object(irDataClient, "_get_resource")
+    def test_rate_limit_headers_partial_storage(self, mock_get_resource):
+        """Test that only present rate limit headers are stored"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            'x-ratelimit-limit': '1000',
+            'x-ratelimit-remaining': '999'
+            # Missing x-ratelimit-reset
+        }
+        mock_response.json.return_value = {"test": "data"}
+        
+        # Set authenticated to bypass login
+        self.client.authenticated = True
+        
+        with patch.object(self.client.session, 'get', return_value=mock_response):
+            self.client._get_resource_or_link("http://test.com")
+        
+        # Only present headers should be stored
+        expected_headers = {
+            'x-ratelimit-limit': '1000',
+            'x-ratelimit-remaining': '999'
+        }
+        self.assertEqual(self.client.last_rate_limit_headers, expected_headers)
+
+    def test_get_rate_limit_limit(self):
+        """Test get_rate_limit_limit method"""
+        # Test with header present
+        self.client.last_rate_limit_headers = {'x-ratelimit-limit': '1000'}
+        self.assertEqual(self.client.get_rate_limit_limit(), 1000)
+        
+        # Test with header missing
+        self.client.last_rate_limit_headers = {}
+        self.assertIsNone(self.client.get_rate_limit_limit())
+
+    def test_get_rate_limit_remaining(self):
+        """Test get_rate_limit_remaining method"""
+        # Test with header present
+        self.client.last_rate_limit_headers = {'x-ratelimit-remaining': '999'}
+        self.assertEqual(self.client.get_rate_limit_remaining(), 999)
+        
+        # Test with header missing
+        self.client.last_rate_limit_headers = {}
+        self.assertIsNone(self.client.get_rate_limit_remaining())
+
+    def test_get_rate_limit_reset(self):
+        """Test get_rate_limit_reset method"""
+        # Test with header present
+        self.client.last_rate_limit_headers = {'x-ratelimit-reset': '1640995200'}
+        self.assertEqual(self.client.get_rate_limit_reset(), 1640995200)
+        
+        # Test with header missing
+        self.client.last_rate_limit_headers = {}
+        self.assertIsNone(self.client.get_rate_limit_reset())
+
+    def test_get_rate_limit_reset_time(self):
+        """Test get_rate_limit_reset_time method"""
+        # Test with header present
+        timestamp = 1640995200
+        self.client.last_rate_limit_headers = {'x-ratelimit-reset': str(timestamp)}
+        reset_time = self.client.get_rate_limit_reset_time()
+        expected_time = datetime.fromtimestamp(timestamp)
+        self.assertEqual(reset_time, expected_time)
+        
+        # Test with header missing
+        self.client.last_rate_limit_headers = {}
+        self.assertIsNone(self.client.get_rate_limit_reset_time())
+
+    def test_seconds_until_reset(self):
+        """Test seconds_until_reset method"""
+        # Test with future timestamp
+        future_timestamp = int((datetime.now() + timedelta(minutes=5)).timestamp())
+        self.client.last_rate_limit_headers = {'x-ratelimit-reset': str(future_timestamp)}
+        seconds = self.client.seconds_until_reset()
+        self.assertIsNotNone(seconds)
+        self.assertGreater(seconds, 0)
+        self.assertLess(seconds, 301)  # Should be less than 5 minutes + 1 second
+        
+        # Test with past timestamp (should return 0)
+        past_timestamp = int((datetime.now() - timedelta(minutes=5)).timestamp())
+        self.client.last_rate_limit_headers = {'x-ratelimit-reset': str(past_timestamp)}
+        seconds = self.client.seconds_until_reset()
+        self.assertEqual(seconds, 0)
+        
+        # Test with header missing
+        self.client.last_rate_limit_headers = {}
+        self.assertIsNone(self.client.seconds_until_reset())
+
+    def test_rate_limit_info_property(self):
+        """Test rate_limit_info property"""
+        # Test with all headers present
+        timestamp = int((datetime.now() + timedelta(minutes=5)).timestamp())
+        self.client.last_rate_limit_headers = {
+            'x-ratelimit-limit': '1000',
+            'x-ratelimit-remaining': '999',
+            'x-ratelimit-reset': str(timestamp)
+        }
+        
+        info = self.client.rate_limit_info
+        self.assertEqual(info['limit'], 1000)
+        self.assertEqual(info['remaining'], 999)
+        self.assertEqual(info['reset'], timestamp)
+        self.assertIsNotNone(info['reset_time'])
+        self.assertIsNotNone(info['seconds_until_reset'])
+        
+        # Test with no headers
+        self.client.last_rate_limit_headers = {}
+        info = self.client.rate_limit_info
+        self.assertIsNone(info['limit'])
+        self.assertIsNone(info['remaining'])
+        self.assertIsNone(info['reset'])
+        self.assertIsNone(info['reset_time'])
+        self.assertIsNone(info['seconds_until_reset'])
 
 
 if __name__ == "__main__":
